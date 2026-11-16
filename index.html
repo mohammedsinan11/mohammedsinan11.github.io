@@ -287,7 +287,7 @@ const MOBILE = matchMedia('(pointer: coarse)').matches || Math.min(innerWidth, i
 let QUALITY = params.get('q') || (MOBILE ? 'low' : 'high');
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-let pixelRatio = Math.min(devicePixelRatio, QUALITY === 'high' ? 2 : 1.5);
+let pixelRatio = Math.min(devicePixelRatio, QUALITY === 'ultra' ? 2 : 1.5);
 renderer.setPixelRatio(pixelRatio);
 renderer.setSize(VW(), VH());
 renderer.shadowMap.enabled = true;
@@ -1233,10 +1233,12 @@ const player = new THREE.Group();
   const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; player.add(o); return o; };
   const body = add(new THREE.CapsuleGeometry(.42, .42, 8, 16), shirt, 0, .78, 0);
   const head = add(new THREE.SphereGeometry(.56, 28, 20), skin, 0, 1.68, 0);
-  const hr = add(new THREE.SphereGeometry(.585, 28, 20, 0, Math.PI * 2, 0, Math.PI * .52), hair, 0, 1.72, -.03); hr.rotation.x = -.28;
+  // hair, eyes and cheeks are children of the head so they bob with it (hair used to clip through)
+  const onHead = (geo, m, x, y, z) => { const o = add(geo, m, x, y - 1.68, z); head.add(o); return o; };
+  const hr = onHead(new THREE.SphereGeometry(.585, 28, 20, 0, Math.PI * 2, 0, Math.PI * .52), hair, 0, 1.72, -.03); hr.rotation.x = -.28;
   const eyeM = std('#2a2622', { roughness: .3 });
-  for (const ex of [-.19, .19]) { const e = add(new THREE.SphereGeometry(.075, 12, 10), eyeM, ex, 1.68, .51); e.scale.set(1, 1.25, .6); }
-  for (const ex of [-.31, .31]) { const c = add(new THREE.SphereGeometry(.09, 10, 8), std('#ffa0a0'), ex, 1.53, .46); c.scale.set(1, .6, .4); }
+  for (const ex of [-.19, .19]) { const e = onHead(new THREE.SphereGeometry(.075, 12, 10), eyeM, ex, 1.68, .51); e.scale.set(1, 1.25, .6); }
+  for (const ex of [-.31, .31]) { const c = onHead(new THREE.SphereGeometry(.09, 10, 8), std('#ffa0a0'), ex, 1.53, .46); c.scale.set(1, .6, .4); }
   const legs = [-.17, .17].map(lx => add(new THREE.CapsuleGeometry(.12, .22, 4, 8), pants, lx, .26, 0));
   const arms = [-.5, .5].map(ax => { const a = add(new THREE.CapsuleGeometry(.1, .32, 4, 8), shirt, ax, .85, 0); a.rotation.z = ax > 0 ? -.25 : .25; return a; });
   player.userData = { body, head, legs, arms };
@@ -1403,7 +1405,7 @@ if (!params.has('nobake')) (async () => {
     tg.setAttribute('uv1', new THREE.BufferAttribute(tuv, 2));
     const tm = window.__terrain.material; tm.aoMap = aoT; tm.lightMap = liT; tm.aoMapIntensity = meta.aoStrength ?? 1; tm.lightMapIntensity = meta.lightScale ?? 1; tm.needsUpdate = true;
     hemi.intensity *= meta.hemiScale ?? 1; sun.intensity *= meta.sunScale ?? 1;
-    if (gtao) gtao.blendIntensity = meta.gtaoBlend ?? .55;
+    if (gtao) { gtao.blendIntensity = meta.gtaoBlend ?? .55; gtao.enabled = QUALITY === 'ultra'; }   // baked AO covers it, GTAO costs ~40% of the frame
     window.__baked = true;
   } catch (e) { console.warn('no bake', e); }
 })();
@@ -1484,7 +1486,7 @@ function measureUI() {
   NAV = { left: r.left, top: r.top, bottom: r.bottom, width: SHOT ? 0 : r.width, side: r.width < VW() * .5 };
 }
 measureUI(); addEventListener('resize', measureUI);
-let walkT = 0, frames = 0, acc = 0, fpsCheckDone = false;
+let walkT = 0, frames = 0, acc = 0, slow = 0, lastNow = performance.now();
 // portrait screens: pull the camera back so the whole village fits
 const CAM_BASE = camOff.clone(); let FOGK = 1;
 function fitCam() { const a = VW() / VH(); FOGK = Math.min(2.1, Math.max(1, Math.pow(1.6 / a, .55))); camOff.copy(CAM_BASE).multiplyScalar(FOGK); if (introT >= INTRO) { scene.fog.near = 80 * FOGK; scene.fog.far = 190 * FOGK; } }
@@ -1628,19 +1630,25 @@ function frame() {
   if (nearHouse !== lastNear && introT >= INTRO) { lastNear = nearHouse; if (heroVisible) window.__markStation?.(nearHouse ? nearHouse.idx : -1); }
   if (heroVisible) composer.render(dt);
 
-  // --- adaptive quality: after 3 s, step down if too slow
-  if (!fpsCheckDone && !SHOT) {
-    frames++; acc += dt;
-    if (acc > 3) {
-      const ms = acc / frames * 1000;
-      if (ms > 24 && pixelRatio > 1) { pixelRatio = 1; resize(); frames = 0; acc = 0; }
-      else if (ms > 24 && gtao && gtao.enabled) { gtao.enabled = false; frames = 0; acc = 0; }
-      else fpsCheckDone = true;
+  // --- adaptive quality: keep watching the real frame time; step down while it stays slow
+  const now = performance.now(), real = now - lastNow; lastNow = now;
+  if (!SHOT && heroVisible && !document.hidden && real < 250) {
+    frames++; acc += real;
+    if (acc > 2000) {
+      const ms = acc / frames; frames = 0; acc = 0;
+      slow = ms > 21 ? slow + 1 : 0;
+      if (slow) {
+        if (gtao && gtao.enabled) gtao.enabled = false;
+        else if (pixelRatio > 1) { pixelRatio = Math.max(1, +(pixelRatio - .25).toFixed(2)); resize(); }
+        else if (bloom.enabled) bloom.enabled = false;
+        else if (renderer.shadowMap.enabled && sun.shadow.mapSize.x > 2048) { sun.shadow.mapSize.set(2048, 2048); sun.shadow.map?.dispose(); sun.shadow.map = null; }
+      }
     }
   }
   requestAnimationFrame(frame);
 }
 if (!INTRO && SHOTS[SHOT]?.intro === undefined) document.documentElement.classList.remove('intro');
+window.__dbg = { renderer, composer, gtao, bloom, scene, camera, sun, setPR(p) { pixelRatio = p; resize(); } };
 frame();
 window.__ready = true;
 </script>
