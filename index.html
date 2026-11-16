@@ -1549,7 +1549,7 @@ const CAM_BASE = camOff.clone(); let FOGK = 1;
 function fitCam() { const a = VW() / VH(); FOGK = Math.min(2.1, Math.max(1, Math.pow(1.6 / a, .55))); camOff.copy(CAM_BASE).multiplyScalar(FOGK); if (introT >= INTRO) { scene.fog.near = 80 * FOGK; scene.fog.far = 190 * FOGK; } }
 fitCam(); addEventListener('resize', fitCam);
 camera.position.copy(player.position).add(camOff);
-let vy = 0, grounded = true, squash = 0;
+let vy = 0, grounded = true, squash = 0, idleT = 0;
 const groundAt = (x, z) => onDock(x, z) ? Math.max(.47, heightAt(x, z)) : heightAt(x, z);
 // highest surface under the feet: terrain, or the top of a low obstacle we are already above
 function supportAt(x, z, feet) {
@@ -1567,6 +1567,16 @@ function canStand(x, z, feet = -99) {
     if (d2 < (c.r + .4) ** 2 && feet < c.y + c.h - .25 && d2 < (c.x - px) ** 2 + (c.z - pz) ** 2) return false;
   }
   return true;
+}
+// something we could hop onto/over right in front: only low obstacles, and nothing tall in the way
+function hopAhead(x, z, feet) {
+  if (heightAt(x, z) < .2 || gradAt(x, z) > 1.15) return false;
+  const px = player.position.x, pz = player.position.z; let low = false;
+  for (const c of colliders) {
+    const d2 = (c.x - x) ** 2 + (c.z - z) ** 2;
+    if (d2 < (c.r + .4) ** 2 && feet < c.y + c.h - .25 && d2 < (c.x - px) ** 2 + (c.z - pz) ** 2) { if (c.h < 9 && c.y + c.h - feet < 1.5) low = true; else return false; }
+  }
+  return low;
 }
 function frame() {
   const dt = Math.min(clock.getDelta(), .05), t = clock.elapsedTime;
@@ -1591,10 +1601,12 @@ function frame() {
     dir.normalize();
     const run = keys.ShiftLeft || keys.ShiftRight, sp = (run ? 13 : 8.5) * dt;
     next.copy(player.position).addScaledVector(dir, sp);
+    // auto-hop: look a little further ahead so the jump starts before we bump into it
+    if (grounded && !travel) { const ax = player.position.x + dir.x * .9, az = player.position.z + dir.z * .9; if (hopAhead(ax, az, feet)) wantJump = true; }
     if (canStand(next.x, next.z, feet)) player.position.copy(next);
     else if (canStand(next.x, player.position.z, feet)) player.position.x = next.x;
     else if (canStand(player.position.x, next.z, feet)) player.position.z = next.z;
-    else target = null;
+    else if (!wantJump && grounded) target = null;
     let d = Math.atan2(dir.x, dir.z) - player.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d));
     player.rotation.y += d * Math.min(1, dt * 14);
     walkT += dt * (run ? 21 : 16);
@@ -1614,6 +1626,8 @@ function frame() {
   wantJump = false;
   // --- animation
   const ud = player.userData, sw = Math.sin(walkT), air = !grounded && !travel;
+  idleT = moving || air || travel ? 0 : idleT + dt;
+  const waving = !!nearHouse && idleT > .25 && introT >= INTRO;
   squash += (0 - squash) * Math.min(1, dt * 10);
   ud.rig.scale.set(1 + squash * .5, 1 - squash, 1 + squash * .5);
   const swing = air ? 0 : sw;
@@ -1622,8 +1636,11 @@ function frame() {
   for (const k of [0, 1]) {
     const a = ud.arms[k], side = k ? 1 : -1;
     a.rotation.x += ((air ? -.4 : (k ? 1 : -1) * -swing * .9) - a.rotation.x) * Math.min(1, dt * 20);
-    a.rotation.z += ((air ? side * 1.9 : side * .32) - a.rotation.z) * Math.min(1, dt * 14);
+    const wave = k === 1 && waving;
+    a.rotation.z += ((air ? side * 1.9 : wave ? side * (2.05 + Math.sin(t * 10) * .4) : side * .32) - a.rotation.z) * Math.min(1, dt * 14);
+    if (wave) a.rotation.x += (-.55 - a.rotation.x) * Math.min(1, dt * 14);
   }
+  if (waving) { let d = Math.atan2(camOff.x, camOff.z) - player.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); player.rotation.y += d * Math.min(1, dt * 5); }
   ud.hips.position.y = .42 + (moving && !air ? Math.abs(sw) * .07 : Math.sin(t * 2.2) * .008);
   ud.torso.rotation.x += ((moving && !air ? .12 : 0) - ud.torso.rotation.x) * Math.min(1, dt * 8);
   ud.head.rotation.z = moving && !air ? Math.sin(walkT) * .06 : Math.sin(t * 1.3) * .03;
